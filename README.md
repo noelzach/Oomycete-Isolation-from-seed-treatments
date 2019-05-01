@@ -1,1 +1,0 @@
-# Valent-Isolation-Manuscript
