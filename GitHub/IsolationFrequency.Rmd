@@ -1,0 +1,549 @@
+---
+title: "IsolationFrequency"
+author: "Zachary Noel"
+date: "June 22, 2016"
+output: html_document
+---
+
+```{r}
+rm(list = ls(all=TRUE)) # removes all variables in the global environment so you start fresh
+```
+
+##Read in Data
+```{r Read Data}
+iso <- read.table("IsolationRecoveryV6.csv", na.strings = ".", sep = ",", header = TRUE)
+str(iso)
+```
+##Source FunctionsThemes.R
+```{r Source Functions}
+library(ggplot2)
+source("FunctionsThemes.R")
+```
+
+
+
+
+##Load packages
+```{r Load Packages}
+packages <- c("drc", "lme4", "lsmeans", "plyr","dplyr", "plotrix", "knitr", "ggplot2", "lmtest", "lmerTest", "Rmisc", "gridExtra", "plotly", "webshot", "ggpmisc", "multcompView", "growthcurver", "ggjoy", "reshape", "ggsci", "dr4pl", "purrr", "tidyverse", "xml2", "ggpubr", "ggfortify", "multcomp", "lme4", "ggpubr", "cowplot", "stringr", "phyloseq", "ggalt", "ggrepel")
+ipak(packages)
+```
+
+##Chi-squared tests for isolation success/failures
+Here we are just setting up to do a chi-squared test of isolation successes from root tissue in 2016 and 2017
+
+Here we are conducting a chi-squared test to see if any of the treatments have a significantly higher percentage of isolation successes accross all sites.We are defining a success if one or more isolates were recovered from either the stem or root tissue. In total there were 370 attempts to isolate from stem or root tissue from all sites.  
+
+NULL: The null hypothesis is that all groups (treatments) are independent, meaning all groups come from the same population. 
+ALTERNATIVE: one or more groups come from different populations
+
+Michigan 
+```{r Run Michigan Chi-Squared}
+# Michigan 2016
+stem.2016.MI <- chi.attempt("stem", 2016, "MI")
+root.2016.MI <- chi.attempt("root", 2016, "MI")
+stem.2016.MI
+root.2016.MI
+
+# Michigan 2017
+stem.2017.MI <- chi.attempt("stem", 2017, "MI")
+root.2017.MI <- chi.attempt("root", 2017, "MI")
+root.2017.MI
+stem.2017.MI
+```
+
+Illinois
+```{r Illinois Chi-Squared}
+# Illinois 2016
+stem.2016.IL <- chi.attempt("stem", 2016, "IL")
+root.2016.IL <- chi.attempt("root", 2016, "IL")
+stem.2016.IL
+root.2016.IL
+
+# Illinois 2017
+stem.2017.IL <- chi.attempt("stem", 2017, "IL")
+root.2017.IL <- chi.attempt("root", 2017, "IL")
+stem.2017.IL
+root.2017.IL
+```
+
+Indianna
+```{r Indianna Chi-Squared}
+# Indianna 2016 only - Trial was not conducted in 2017
+stem.2016.IN <- chi.attempt("stem", 2016, "IN")
+root.2016.IN <- chi.attempt("root", 2016, "IN")
+stem.2016.IN
+root.2016.IN
+```
+
+Ohio
+```{r Ohio Chi-Squared}
+# Ohio 2016 
+stem.2016.OH <- chi.attempt("stem", 2016, "OH")
+root.2016.OH <- chi.attempt("root", 2016, "OH")
+stem.2016.OH
+root.2016.OH
+
+# Ohio 2017
+stem.2017.OH <- chi.attempt("stem", 2017, "OH")
+root.2017.OH <- chi.attempt("root", 2017, "OH")
+stem.2017.OH
+root.2017.OH
+```
+
+Iowa
+```{r Iowa Chi-Squared}
+# Iowa 2016 
+stem.2016.IA <- chi.attempt("stem", 2016, "IA")
+root.2016.IA <- chi.attempt("root", 2016, "IA")
+stem.2016.IA
+root.2016.IA
+
+# Iowa 2017
+stem.2017.IA <- chi.attempt("stem", 2017, "IA")
+root.2017.IA <- chi.attempt("root", 2017, "IA")
+stem.2017.IA
+root.2017.IA
+```
+
+
+##Sanity check to make sure the number of attempts to isolate an oomycete does not exceed the number of isolate codes
+```{r}
+Sanity_Check <- iso %>%
+  group_by(location, Year, trtname, isloc) %>%
+  nest() %>%
+  mutate(attempts = purrr::map(data, ~ subset(.,.$isattempt == TRUE))) %>%
+  mutate(N_attempts = purrr::map(attempts, ~nrow(.))) %>%
+  mutate(success = purrr::map(data, ~ subset(.,.$isrecover == TRUE))) %>%
+  mutate(N_success = purrr::map(success, ~nrow(.))) %>%
+  mutate(N_isolates_count = purrr::map(data, ~ length(na.omit(unique(.$isolate_code))))) %>%
+  unnest(N_attempts) %>%
+  unnest(N_success) %>%
+  unnest(N_isolates_count) %>%
+  select(location, Year, trtname, isloc, N_attempts, N_success, N_isolates_count)
+
+Sanity_Check$Make_Sense <- ifelse(Sanity_Check$N_isolates_count >= Sanity_Check$N_success, "Good", "Bad")
+
+#write.csv(Sanity_Check, "sanity_check.csv")
+```
+Looks like it is all fine. 
+
+##Logistic regression for binary isolation data - Seed treatment effect 
+```{r Isolation Attempts}
+log_mod <- glm(isrecover ~ trtname*location*as.factor(Year)*isloc, data = iso[iso$isattempt == TRUE,], family = binomial)
+lmtest::lrtest(log_mod) # tests for significance that the overall interaction is significant compared to a null model. 
+```
+
+```{r Overdispersion test}
+# Checking dispersion, The main problem is overdispersed models, meaning that the variance of the residual is more than the assumed distribution. 
+# if the residual diviance is greater than expected about 1.5 times than the df of the residuals the model is likely overdisperssed 
+df_resid <- log_mod$df.residual
+deviance <- log_mod$deviance
+deviance/df_resid # looks ok
+```
+
+```{r Residual normality}
+# Checking normality of residuals
+# this is likely not the best way to do this, the DARMA R package explains more about this. 
+qqnorm(resid(log_mod)); qqline(resid(log_mod)) # looks like we are not deviating too much from the line. 
+```
+
+###Treatment - All
+Here we are contrasting the effect of the seed treatment within all possible combinations of tissue, site, and year. 
+```{r LSMEANS trtXtissueXlocationXyear}
+lsmeans.log.mod <- emmeans::emmeans(log_mod, ~trtname|isloc|location|Year)
+Results_lsmeans_trtXtissueXlocationXyear <- cld(lsmeans.log.mod , alpha = 0.05, adjust = "tukey", Letters = letters, reversed = TRUE, details = TRUE)
+Results_lsmeans_trtXtissueXlocationXyear
+```
+Looks like there was a significant effect of seed treatment on isolation success in Illinois 2016 roots, Illinois 2017 roots, and Iowa 2017 stem.
+
+Now we will get the predicted probabilities of isolation successes from these seed treatments
+```{r Pred Prob trtXtissueXlocationXyear}
+newdata1 <- iso %>%
+  group_by(location, Year, trtname, isloc) %>%
+  nest() %>%
+  select(location, Year, trtname, isloc)
+levels(newdata1$trtname)
+pred.prob <- predict(log_mod, newdata = newdata1, type = "response", se.fit=TRUE)
+newdata1$prob <- pred.prob$fit
+newdata1$se.prob <- pred.prob$se.fit
+# the warning about rank deficient fits are because of the lack of having Indianna in 2017. Not much we can do about that. 
+newdata1$chemicals <- ifelse(newdata1$trtname == "Cruisermaxx", "Mefenoxam", 
+                             ifelse(newdata1$trtname == "Intego Suite", "Metalaxyl + Ethaboxam", "NTC"))
+
+#write.csv(newdata1, "newdata1.csv")
+```
+
+We are going to plot the effect of seed treatment in isolation success for significant site years.
+```{r Plotting the predicted probabilities}
+names <- c("NTC", "Mefenoxam", "Metalaxyl + Ethaboxam")
+
+IL.2016.root <- newdata1 %>% 
+  subset(location == "IL" & Year == 2016 & isloc == "root") 
+
+A <- ggplot(IL.2016.root, aes(x = chemicals, y = prob)) + 
+  geom_errorbar(aes(ymin = prob - se.prob, ymax = prob + se.prob), width = 0.2, alpha = 0.6) + 
+  geom_point(color = "black", shape = 21, alpha = 0.6, size = 4, fill = "grey") + 
+  scale_x_discrete(limits = names) +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  theme_classic() +
+  #annotate("text", label = "n = 24", size = 4, x = 0.8, y = 0) +
+  xlab("") + 
+  ylab("Predicted probability of \n successful oomycete isolation") +
+  ggtitle("Illinois 2016 Soybean Lateral root") +
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+
+IL.2017.root <- newdata1 %>% 
+  subset(location == "IL" & Year == 2017 & isloc == "root") 
+
+B <- ggplot(IL.2017.root, aes(x = chemicals, y = prob)) + 
+  geom_errorbar(aes(ymin = prob - se.prob, ymax = prob + se.prob), width = 0.2, alpha = 0.6) + 
+  geom_point(color = "black", shape = 21, alpha = 0.6, size = 4, fill = "grey") + 
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_x_discrete(limits = names) +
+  theme_classic() +
+  #annotate("text", label = "n = 36", size = 4, x = 0.8, y = 0) +
+  xlab("") + 
+  ylab("Predicted probability of \n successful oomycete isolation") +
+  ggtitle("Illinois 2017 Soybean Lateral root") +
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+
+plot_grid(A, B, nrow = 1, labels = "AUTO")
+```
+
+##Logistic regression for binary isolation data - Tissue effect
+
+we will contrast the effect of tissue location (i.e. stem or root) on isolation success. This is imporant to document since it based on observations while isolating it seemed that this depended on location. 
+
+I will subset the data to only include the non-treated roots since the predicted probability may be confounded by the seed treatment. 
+
+```{r Isolation Attempts}
+log_mod <- glm(isrecover ~ location*as.factor(Year)*isloc, data = iso[iso$isattempt == TRUE & iso$trtname == "NTC",], family = binomial)
+lmtest::lrtest(log_mod) # tests for significance that the overall interaction is significant compared to a null model. 
+summary(log_mod)
+```
+
+```{r Overdispersion test}
+# Checking dispersion, The main problem is overdispersed models, meaning that the variance of the residual is more than the assumed distribution. 
+# if the residual diviance is greater than expected about 1.5 times than the df of the residuals the model is likely overdisperssed 
+df_resid <- log_mod$df.residual
+deviance <- log_mod$deviance
+deviance/df_resid # looks ok
+```
+
+```{r Residual normality}
+# Checking normality of residuals
+# this is likely not the best way to do this, the DARMA R package explains more about this. 
+qqnorm(resid(log_mod)); qqline(resid(log_mod)) # looks like we are not deviating too much from the line. 
+```
+
+```{r LSMEANS tissueXlocationXyear}
+lsmeans.log.mod.tissue <- emmeans::emmeans(log_mod, ~isloc|location|Year)
+Results_lsmeans_tissueXlocationXyear <- emmeans::CLD(lsmeans.log.mod.tissue , alpha = 0.05, Letters = letters, reversed = TRUE, details = TRUE, type = "response")
+Results_lsmeans_tissueXlocationXyear
+```
+Looks like there was a significant difference in isolation success in Iowa 2016, Michigan 2016, and Ohio 2017. However it is also interesting for some sites the proability was the same. For example, in Iowa 2017, there were plenty of isolates that came from both stem and root tissue. 
+
+Now we will get the predicted probabilities of isolation successes from these seed treatments
+```{r Pred Prob trtXtissueXlocationXyear}
+newdata2 <- iso %>%
+  group_by(location, Year, isloc) %>%
+  nest() %>%
+  select(location, Year, isloc)
+levels(newdata1$trtname)
+pred.prob <- predict(log_mod, newdata = newdata2, type = "response", se.fit=TRUE)
+newdata2$prob <- pred.prob$fit
+newdata2$se.prob <- pred.prob$se.fit
+newdata2$labels <- ifelse(newdata2$isloc == "stem", "Taproot", "Root")
+# the warning about rank deficient fits are because of the lack of having Indianna in 2017. Not much we can do about that. 
+#write.csv(newdata2, "newdata2.csv")
+```
+
+```{r}
+ggplot(newdata2, aes(x = labels, y = prob)) + 
+  geom_errorbar(aes(ymin = prob - se.prob, ymax = prob + se.prob), width = 0.2, alpha = 0.6) + 
+  geom_point(color = "black", shape = 21, alpha = 0.6, size = 4, fill = "grey") + 
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  theme_classic() +
+  annotate("text", label = "n = 24", size = 4, x = 0.8, y = 0) +
+  xlab("") + 
+  ylab("Predicted probability of \n successful oomycete isolation") +
+  facet_wrap(~location*Year)
+```
+
+```{r Plots:root-stem}
+IA.2016 <- newdata2 %>% 
+  subset(location == "IA" & Year == 2016) 
+
+A <- ggplot(IA.2016, aes(x = isloc, y = prob)) + 
+  geom_errorbar(aes(ymin = prob - se.prob, ymax = prob + se.prob), width = 0.2, alpha = 0.6) + 
+  geom_point(color = "black", shape = 21, alpha = 0.6, size = 4, fill = "grey") + 
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  theme_classic() +
+  annotate("text", label = "n = 24", size = 4, x = 0.8, y = 0) +
+  xlab("") + 
+  ylab("Predicted probability of \n successful oomycete isolation") +
+  ggtitle("Iowa 2016 Soybean")
+
+MI.2017 <- newdata2 %>% 
+  subset(location == "MI" & Year == 2017) 
+
+B <- ggplot(MI.2017, aes(x = isloc, y = prob)) + 
+  geom_errorbar(aes(ymin = prob - se.prob, ymax = prob + se.prob), width = 0.2, alpha = 0.6) + 
+  geom_point(color = "black", shape = 21, alpha = 0.6, size = 4, fill = "grey") + 
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  theme_classic() +
+  annotate("text", label = "n = 30", size = 4, x = 0.8, y = 0) +
+  xlab("") + 
+  ylab("Predicted probability of \n successful oomycete isolation") +
+  ggtitle("Michigan 2016 Soybean") 
+
+OH.2017 <- newdata2 %>% 
+  subset(location == "OH" & Year == 2016) 
+
+C <- ggplot(OH.2017, aes(x = isloc, y = prob)) + 
+  geom_errorbar(aes(ymin = prob - se.prob, ymax = prob + se.prob), width = 0.2, alpha = 0.6) + 
+  geom_point(color = "black", shape = 21, alpha = 0.6, size = 4, fill = "grey") + 
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  theme_classic() +
+  annotate("text", label = "n = 36", size = 4, x = 0.8, y = 0) +
+  xlab("") + 
+  ylab("Predicted probability of \n successful oomycete isolation") +
+  ggtitle("Ohio 2017 Soybean") 
+
+plot_grid(A, B, C, nrow = 1, labels = "AUTO")
+```
+
+##Multiple oomycete species being isolated. 
+```{r}
+#2016
+multispecies.2016 <- nrow(subset(iso,iso$isattempt == TRUE & iso$isrecover == TRUE & iso$Year == 2016)) #Not correct. 
+multispecies.true.2016 <- nrow(subset(iso,iso$isolate_multi_spec == TRUE & iso$Year == 2016))
+(multispecies.true.2016/multispecies.2016)*100
+
+#2017
+multispecies.2017 <- nrow(subset(iso,iso$isattempt == TRUE & iso$isrecover == TRUE & iso$Year == 2017)) #Not correct - need to subset it for only instances where more than one isolate was obtained
+multispecies.true.2017 <- nrow(subset(iso,iso$isolate_multi_spec == TRUE & iso$Year == 2017))
+(multispecies.true.2017/multispecies.2017)*100
+```
+
+From the same plant?
+```{r}
+sameplant  <- iso %>%
+  group_by(camefrom) %>%
+  nest() %>%
+  mutate(how.many.species.per.plant = purrr::map(data, ~ length(unique(as.character(na.omit(.$Conservative.Taxonomy)))))) %>%
+  mutate(how.many.isolates.per.plant = purrr::map(data, ~ length(unique(as.character(na.omit(.$isolate_code)))))) %>%
+  mutate(Year = purrr::map(data, ~ unique(as.character(na.omit(.$Year))))) %>%
+  unnest(how.many.species.per.plant) %>%
+  unnest(how.many.isolates.per.plant) %>%
+  unnest(Year)
+
+#how many instances were there that multiple isolates were obtained from the same plant from the same plant in 2016? 
+multi.plant.isolates.2016 <- nrow(sameplant[sameplant$how.many.isolates.per.plant > 1 & sameplant$Year == 2016,])
+# in 2017
+multi.plant.isolates.2017 <- nrow(sameplant[sameplant$how.many.isolates.per.plant > 1 & sameplant$Year == 2017,])
+
+#how many instances were there that those with multiple isolates were multiple species
+multi.plant.species.2016 <- nrow(sameplant[sameplant$how.many.species.per.plant > 1 & sameplant$Year == 2016,])
+# in 2017
+multi.plant.species.2017 <- nrow(sameplant[sameplant$how.many.species.per.plant > 1 & sameplant$Year == 2017,])
+
+# Frequency of multiple species coming from the same plant in 2016. 
+multi.plant.species.2016/multi.plant.isolates.2016
+
+# Frequency of multiple species coming from the same plant in 2017. 
+multi.plant.species.2017/multi.plant.isolates.2017
+```
+
+
+##Spiecies distributions
+```{r}
+iso_freq <- iso %>%
+    group_by(Conservative.Taxonomy, Year) %>%
+    summarize(N = n()) %>%
+    ungroup() %>%
+    complete(Conservative.Taxonomy, Year,
+             fill = list(N = 0)) %>%
+  spread(Year, N) %>%
+  na.omit()
+
+iso_freq_loc <- iso %>%
+    group_by(Conservative.Taxonomy, Year, location) %>%
+    summarize(N = n()) %>%
+    ungroup() %>%
+    complete(Conservative.Taxonomy, Year, location,
+             fill = list(N = 0)) %>%
+    na.omit() %>%
+    group_by(Year, location) %>%
+    nest() %>%
+    mutate(freq = purrr::map(data, ~.$N/sum(.$N))) %>% 
+    unnest(data, freq) 
+    
+iso_freq_loc$location.year <- interaction(iso_freq_loc$Year, iso_freq_loc$location)
+
+iso_freq_loc %>%
+  filter(location.year != "2017.IN") %>%
+ggplot(aes(location.year, reorder(Conservative.Taxonomy, freq))) + 
+  geom_tile(aes(fill = freq*100),colour = "white") + 
+  scale_fill_gradient(low = "white", high = "steelblue", name = "Frequency") + 
+  theme_classic() + 
+  xlab("") + 
+  ylab("") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+iso_freq$freq_16 <- 100*(iso_freq$`2016`/sum(iso_freq$`2016`))
+iso_freq$freq_17 <- 100*(iso_freq$`2017`/sum(iso_freq$`2017`))
+iso_freq$total.count <- iso_freq$`2016` + iso_freq$`2017`
+iso_freq$total.freq <- 100*(iso_freq$total.count/sum(iso_freq$total.count))
+
+Isol_16 <- ggplot(iso_freq, aes(x=reorder(Conservative.Taxonomy, freq_16), y=freq_16)) + 
+  geom_bar(stat="identity", color="#636363", fill="#7fbf7b") + 
+  geom_text(stat = "identity", aes(label = `2016`, y = -1.5)) +
+  theme_bw() +
+  theme(axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank()
+        #plot.margin = unit(c(1,-4,1,-6.5), "mm")
+        ) +
+  labs(y="Frequency (%)") +  xlab(NULL) +
+  coord_flip() +
+  scale_y_reverse(limits=c(40,-3), expand=c(0,0)) 
+
+Isol_17 <- ggplot(iso_freq, aes(x=reorder(Conservative.Taxonomy, freq_16), y=freq_17)) + 
+  geom_bar(stat="identity", color="#636363", fill="#9ecae1") + 
+  geom_text(stat = "identity", aes(label = `2017`, y = -1.5)) +
+  xlab(NULL) + theme_bw() + 
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+        #plot.margin = unit(c(1,-4,1,-6.5), "mm")
+        ) +
+    labs(y="Frequency (%)") + coord_flip()
+
+#plot_grid(Isol_16, Isol_17, nrow = 1, labels = "AUTO")
+
+mid.Isol <- ggplot(data=iso_freq, aes(x=reorder(Conservative.Taxonomy, freq_16), y=0)) +
+  geom_bar(stat="identity",fill="white", alpha=0) + 
+  geom_text(aes(y=0, label=Conservative.Taxonomy), fontface="italic", size=3, vjust = 1.5) +
+  #geom_segment(aes(y=-0.003,yend=-0.0025,xend=Conservative.Taxonomy), size=0.2) +
+  #geom_segment(aes(y=0.0025,yend=0.003,xend=Conservative.Taxonomy), size=0.2) +
+  xlab(NULL) +
+  coord_flip() + 
+  theme(axis.title.y=element_blank(),
+        axis.text.y= element_blank(),
+        axis.ticks.y=element_blank(),
+        panel.background=element_blank(),
+        panel.grid=element_blank(),
+        axis.line=element_blank(),
+        axis.text.x=element_text(color=NA),
+        axis.ticks.x=element_line(color=NA),
+        axis.title.x=element_text(color=NA),
+        plot.margin = unit(c(1,-4,1,-6.5), "mm")
+        )
+grid.arrange(ggplotGrob(Isol_16), ggplotGrob(mid.Isol), ggplotGrob(Isol_17), ncol=3, widths=c(.3,.2,.3))
+```
+
+Making objects to import into phyloseq for easier analysis. 
+-Note that this version does not take into account the treatment information. I wll add this later. 
+```{r}
+iso_freq_2 <- iso %>%
+    group_by(Conservative.Taxonomy, Year, location, rep) %>%
+    summarize(N = n()) %>%
+    ungroup() %>%
+    complete(Conservative.Taxonomy, Year, location, rep,
+             fill = list(N = 0)) %>%
+  na.omit()
+
+iso_freq_2$sample <- paste(iso_freq_2$location, iso_freq_2$Year, iso_freq_2$rep)
+species.table <- iso_freq_2 %>% select(Conservative.Taxonomy, N, sample) %>%
+  spread(sample, N)
+species.table <- data.frame(species.table)
+species.table$Species <- sprintf("Sp%d", 1:length(levels(species.table$Conservative.Taxonomy)))   
+rownames(species.table) <- species.table$Species
+
+#Making a taxonomy file
+TAX <- data.frame(species.table$Species, species.table$Conservative.Taxonomy); colnames(TAX) <- c("OTU", "species")
+TAX$Kingdom <- rep("Stramenopila", 24)
+TAX$Phylum <- rep("Oomycota", 24)
+TAX$Class <- rep("Oomycete", 24)
+TAX$Order <- c("Peronosporales", rep("Pythiales", 23))
+TAX$Family <- c("Peronosporaceae", rep("Pythiaceae", 23))
+TAX$Genus <- word(TAX$species, 1)
+TAX$Species <- TAX$species
+TAX$Clade <- iso$clade[match(TAX$Species, iso$Conservative.Taxonomy)]
+rownames(TAX) <- TAX$OTU
+TAX <- data.frame(TAX[,-c(1,2)])
+
+#Finalizing the OTU table
+species.table <- species.table[,-1]
+OTU.table <- species.table[,-ncol(species.table)]
+
+#Metadata
+META <- data.frame(colnames(OTU.table)); colnames(META) <- "SampleID"
+META$Location <- word(META$SampleID, 1, sep = fixed('.'))
+META$Year <- word(META$SampleID, 2, sep = fixed('.'))
+META$Rep <- word(META$SampleID, 3, sep = fixed('.'))
+rownames(META) <- META$SampleID
+META <- META[,-1]
+
+taxonomy <- phyloseq::tax_table(as.matrix(TAX))
+otu <- phyloseq::otu_table(OTU.table, taxa_are_rows = TRUE)
+samp <- phyloseq::sample_data(META)
+
+valent.phyloseq <- phyloseq::phyloseq(otu, taxonomy, samp)
+```
+
+Most abundant for each location
+```{r}
+# for beta diversity we cannot have any samples with sum to 0.
+valen.phyloseq.trimmed = prune_samples(sample_sums(valent.phyloseq)> 0, valent.phyloseq)
+valen.phyloseq.trimmed@sam_data$Location.Year <- interaction(valen.phyloseq.trimmed@sam_data$Location, valen.phyloseq.trimmed@sam_data$Year)
+GPr  = transform_sample_counts(valen.phyloseq.trimmed, function(x) x / sum(x) )
+GPfr = filter_taxa(GPr, function(x) mean(x) > 1e-5, TRUE)
+plot_bar(GPfr, x="Location.Year", fill="Species")
+```
+
+
+NMDS
+```{r}
+# for beta diversity we cannot have any samples with sum to 0.
+valen.phyloseq.trimmed = prune_samples(sample_sums(valent.phyloseq)> 0, valent.phyloseq)
+GPdist.bray = phyloseq::distance(valen.phyloseq.trimmed, "jaccard")
+GP.ord.bray <- ordinate(valen.phyloseq.trimmed, "NMDS", "jaccard", trymax = 50, maxit = 100) # NMDS ordination 
+GP.ord.bray$stress
+
+tax <- TAX
+tax$OTU <- rownames(TAX)
+
+species.scores <- data.frame(GP.ord.bray$species)
+species.scores$Species <- tax$Species[match(rownames(species.scores), tax$OTU)]
+
+mypal = pal_npg("nrc", alpha = 0.7)(9)
+global.nmds <- plot_ordination(valen.phyloseq.trimmed, ordination = GP.ord.bray, type = "samples") 
+global.nmds.data <- global.nmds$data
+
+ggplot() + 
+  geom_point(data = global.nmds.data, aes(x = NMDS1, y = NMDS2, fill = Location, shape = Year), 
+             color = "black", size = 2, alpha = 0.6) +
+  geom_encircle(data = global.nmds.data, aes(x = NMDS1, y = NMDS2, fill = Location, shape = Year), 
+             color = "black", size = 2, alpha = 0.6, expand=0) +
+  geom_point(data = species.scores, aes(x = MDS1, y = MDS2), size = 1, shape = 18) +
+  geom_text_repel(data = species.scores, aes(x = MDS1, y = MDS2, label = Species), size = 3) +
+  scale_shape_manual(name = "Year Sampled", values = c(24, 21)) +
+  theme_bw() +
+  
+  #geom_polygon(aes(fill = Location)) +
+  scale_fill_manual(name = "Location", values = c(mypal[1], mypal[2], mypal[3], mypal[4], mypal[5])) +
+  annotate("text", x = -.8, y = 1.6, label = paste("Stress = ", as.character(round(GP.ord.bray$stress, 3)))) +
+  theme_bw() +
+  #geom_text_repel(data = global.nmds.data, aes(x = NMDS1, y = NMDS2, label = SampleID)) + 
+  labs(list(y = expression(bold("NMDS1" )),               
+       x = expression(bold("NMDS2")))) 
+
+
+vegan::adonis2(GPdist.bray~Year*Location, as(sample_data(valen.phyloseq.trimmed), "data.frame")) #Are there significant changes?
+
+# significantly different communities by location and year. 
+```

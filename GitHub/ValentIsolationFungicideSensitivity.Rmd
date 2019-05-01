@@ -1,0 +1,714 @@
+---
+title: "HTFS_Valent"
+author: "Zachary Noel"
+date: "September 6, 2016"
+output: html_document
+---
+
+I include this header at the top of all code I write. 
+
+##Source FunctionsThemes.R
+```{r Source Functions}
+library(ggplot2)
+source("FunctionsThemes.R")
+```
+
+##Load packages
+```{r, include=FALSE}
+#install.packages("rlang")
+# ipak function: install and load multiple R packages.
+# check to see if packages are installed. Install them if they are not, then load them into the R session.
+# Source: https://gist.github.com/stevenworthington/3178163
+
+packages <- c("drc", "lme4", "lsmeans", "plyr","dplyr", "plotrix", "knitr", "ggplot2", "lmtest", "lmerTest", "Rmisc", "gridExtra", "plotly", "webshot", "ggpmisc", "multcompView", "growthcurver", "ggjoy", "reshape", "ggsci", "dr4pl", "purrr", "tidyverse", "xml2", "ggpubr", "ggfortify", "growthcurve", "cowplot")
+ipak(packages)
+
+#devtools::install_github("briandconnelly/growthcurve", build_vignettes = TRUE)
+#library(growthcurve)
+```
+
+##Read in data
+```{r}
+htfs.clean <- read.csv("htfs_valent_clean.csv")
+
+levels(htfs.clean$isolate)
+#write.csv(data.frame(levels(htfs$is)), "isolates_HTFS_done.csv")
+
+htfs.clean$unique <- interaction(htfs.clean$is, htfs.clean$chem, htfs.clean$hrs, htfs.clean$set)
+htfs.clean$set_plot <- htfs.clean$set
+htfs.clean$is_plot <- htfs.clean$is
+```
+
+##Background correction
+Subtracting the mean optical density of the blank wells for each set 
+
+subtracting the blank wells
+```{r}
+chemistry_loop <- levels(htfs.clean$chem)
+
+htfs_minus_meanblank <- NULL
+for(i in unique(htfs.clean$set)){
+  for(z in seq_along(chemistry_loop)){
+      blank_1_24 <- as.numeric(htfs.clean %>% 
+                           filter(chem == chemistry_loop[[z]] & genus == "BLANK" & set == i) %>% 
+                           select(od600) %>% 
+                           summarise(mean(od600)))
+      htfs.clean %>% 
+      filter(chem == chemistry_loop[[z]] & set == i) %>% 
+      mutate(od600meanblank = od600 - blank_1_24) -> htfs2 
+      htfs2$od600meanblank <- ifelse(htfs2$od600meanblank < 0, 0, htfs2$od600meanblank)
+      htfs_minus_meanblank <- rbind.data.frame(htfs_minus_meanblank, htfs2)
+    }
+  }
+```
+##Growth Curves
+Plotting the growth curves for each isolate. 
+```{r}
+growth_plots <- htfs_minus_meanblank %>%
+  subset(chem == "gr") %>%
+  group_by(isolate, set) %>% 
+  arrange(isolate) %>%
+  nest() %>%
+  mutate(growth_plot = map(data, growth_fun)) 
+
+# Print out the plot of the 400 th isolate
+growth_plots$growth_plot[[400]]  
+
+# save all plots to one .pdf file
+# This takes a couple minutes, so uncomment the line to run it. 
+#pdf("all_growthplots.pdf")
+#growth_plots$growth_plot
+#dev.off()
+```
+
+##Z'-factor calculation
+```{r}
+Z.data <- htfs_minus_meanblank %>%
+  subset(chem != "gr" & conc == 0) %>%
+  group_by(isolate, genus, species, chem, set, hrs) %>%
+  summarize(mean.od600 = mean(od600), 
+            sd.od600 = sd(od600)) %>%
+  group_by(set, chem, hrs) %>%
+  nest() %>%
+  mutate(mean.BLANK = map(data, extract.BLANK.mean)) %>%
+  mutate(sd.BLANK = map(data, extract.BLANK.sd)) %>%
+  unnest(mean.BLANK) %>%
+  unnest(sd.BLANK) %>%
+  unnest(data)
+
+Z.data$Z.factor <- Z(Z.data$sd.od600, Z.data$sd.BLANK, Z.data$mean.od600, Z.data$mean.BLANK)
+Z.data$Z.factor <- ifelse(Z.data$Z.factor < 0, 0, Z.data$Z.factor)
+Z.data$unique <- interaction(Z.data$isolate, Z.data$chem, Z.data$hrs, Z.data$set)
+Z.data$chemXhrs <- interaction(Z.data$chem, Z.data$hrs)
+Z.data$hrs <- factor(Z.data$hrs)
+
+ggplot(Z.data, aes(x = reorder(isolate, Z.factor), y = Z.factor, color = as.factor(hrs), shape = chem)) + 
+  geom_point()
+```
+Looks like there were plenty of observations where Z'-factor was not above 0.4. we will use this treshold as a threshold to decide which observations to keep. 
+So I will look through the entire dataset to see if Z'-factor was good at 24 hours. If it was good at 24 hours I will keep that observation. If not I will move onto check the 48 hour measurements. 
+If it is good after 48 hours I will keep that measurement, but I will have to check the growth curves to see if the isolate was still actively growing at 48 hours. 
+If the isolate was still activley growing at 48 hours then it is ok to keep that observation. If not, then unfutunaly we will have to discard that observation, or try to do some outlier control at 24 hour measurement. 
+
+Z'-factor filtering based with mefenoxam data
+```{r Mefenoxam Filter}
+mefenoxam.filter <- Z.data %>%
+  arrange(isolate) %>%
+  subset(chem == "mefenoxam") %>%
+  select(isolate,hrs, Z.factor, set) %>%
+  spread(key = hrs, Z.factor) %>%
+  na.omit()
+
+mefenoxam.filter$filter <- ifelse(mefenoxam.filter$`24` > 0.4 & mefenoxam.filter$`48` > 0.4, "24", ifelse(
+  mefenoxam.filter$`24` > 0.4 & mefenoxam.filter$`48` < 0.4, "24", ifelse(
+  mefenoxam.filter$`24` < 0.4 & mefenoxam.filter$`48` > 0.4, "48", ifelse(
+    mefenoxam.filter$`24` < 0.4 & mefenoxam.filter$`48` < 0.4, "TryAgain", "Whoops"))))
+
+mefenoxam.filter$unique <- ifelse(mefenoxam.filter$filter == "24", paste(mefenoxam.filter$isolate, "mefenoxam", "24", mefenoxam.filter$set, sep = "."), ifelse(
+  mefenoxam.filter$filter == "48", paste(mefenoxam.filter$isolate, "mefenoxam", "48", mefenoxam.filter$set, sep = "."), 
+  "Fail"))
+```
+
+Z'-factor filtering based with ethaboxam data
+```{r Ethaboxam Filter}
+ethaboxam.filter <- Z.data %>%
+  arrange(isolate) %>%
+  subset(chem == "ethaboxam") %>%
+  select(isolate,hrs, Z.factor, set) %>%
+  spread(key = hrs, Z.factor) %>%
+  na.omit()
+
+ethaboxam.filter$filter <- ifelse(ethaboxam.filter$`24` > 0.4 & ethaboxam.filter$`48` > 0.4, "24", ifelse(
+  ethaboxam.filter$`24` > 0.4 & ethaboxam.filter$`48` < 0.4, "24", ifelse(
+  ethaboxam.filter$`24` < 0.4 & ethaboxam.filter$`48` > 0.4, "48", ifelse(
+    ethaboxam.filter$`24` < 0.4 & ethaboxam.filter$`48` < 0.4, "TryAgain", "Whoops"))))
+
+ethaboxam.filter$unique <- ifelse(ethaboxam.filter$filter == "24", paste(ethaboxam.filter$isolate, "ethaboxam", "24", ethaboxam.filter$set, sep = "."), ifelse(
+  ethaboxam.filter$filter == "48", paste(ethaboxam.filter$isolate, "ethaboxam", "48", ethaboxam.filter$set, sep = "."), 
+  "Fail"))
+```
+
+At this point it is really important to check the growth curves manually to examine if any of the isolates flagged for the 48 hour are appropriate to measure at 48 hours. 
+This is really important before proceeding to eliminate errors in EC50 estimates 
+
+I have already done this and have saved the unique ID in a file called nopass.csv which I will load in a couple chunks below. 
+```{r}
+#write.csv(mefenoxam.filter, "mefenoxam.filter.csv")
+#write.csv(ethaboxam.filter, "ethaboxam.filter.csv")
+```
+
+```{r}
+#list of unique IDs for mefenoxam
+mefenoxam.filter.24.good <- mefenoxam.filter$unique[mefenoxam.filter$filter == "24"]
+mefenoxam.filter.48.good <- mefenoxam.filter$unique[mefenoxam.filter$filter == "48"]
+
+#list of unique IDs for ethaboxam
+ethaboxam.filter.24.good <- ethaboxam.filter$unique[ethaboxam.filter$filter == "24"]
+ethaboxam.filter.48.good <- ethaboxam.filter$unique[ethaboxam.filter$filter == "48"]
+
+#Subsetting based on the list for mefenoxam above
+htfs.24.mefenoxam <- htfs_minus_meanblank[htfs_minus_meanblank$unique %in% mefenoxam.filter.24.good,]
+htfs.48.mefenoxam <- htfs_minus_meanblank[htfs_minus_meanblank$unique %in% mefenoxam.filter.48.good,]
+
+#Subsetting based on the list for ethaboxam above
+htfs.24.ethaboxam <- htfs_minus_meanblank[htfs_minus_meanblank$unique %in% ethaboxam.filter.24.good,]
+htfs.48.ethaboxam <- htfs_minus_meanblank[htfs_minus_meanblank$unique %in% ethaboxam.filter.48.good,]
+```
+
+This is where I am eliminating isolates that failed the Z'-factor filter and 48 was too late to measure
+-This is done outside of R by looking at the growth curves plotted with the code above. 
+-I wish there were a more objective way to do this using code, like measuring the derivative at point 48 hours and if the derivative is 0 then you know the growth curve is for sure plateued. But I havent developed that code yet, so for now this is what we are doing. And I am pretty generous on the late log phase interpretation. 
+```{r}
+nopass <- read.csv("nopass.csv", na.strings = "")
+```
+
+Ethaboxam growth curve filter
+```{r}
+length(levels(factor(htfs.48.ethaboxam$isolate))) #103 isolates were good with a Z'factor at 48 hours. 
+# but when checking the growth curves 63 of these had already pleateued. So, we will take them out of the data because it would not be appropriate to measure them at 48 hours. The isolates that failed Z'-factor at both 24 and 48 hours were taken out due to data quality issues. 
+
+nobadethaboxam <- nopass$Isolates_nopass_ethaboxam
+
+# Ethaboxam growth curve filter
+htfs.48.ethaboxam.clean <- htfs.48.ethaboxam[!htfs.48.ethaboxam$unique %in% nobadethaboxam,]
+#How many isolates left? - should be 40 that were measured at 48 hours. Because there were 64 that were not good
+length(levels(factor(htfs.48.ethaboxam.clean$isolate)))
+```
+
+Mefenoxam growth curve filter
+```{r}
+length(levels(factor(htfs.48.mefenoxam$isolate))) #54 isolates were good with a Z'factor at 48 hours. 
+# but when checking the growth curves 29 of these had already pleateued. So, we will take them out of the data because it would not be appropriate to measure them at 48 hours. The isolates that failed Z'-factor at both 24 and 48 hours were taken out due to data quality issues. 
+
+nobadmefenoxam <- levels(na.omit(nopass$Isolates_nopass_mefenoxam))
+
+# Ethaboxam growth curve filter
+htfs.48.mefenoxam.clean <- htfs.48.mefenoxam[!htfs.48.mefenoxam$unique %in% nobadmefenoxam,]
+#How many isolates left? - should be 25 that were measured at 48 hours. Because there were 29 that were not good
+length(levels(factor(htfs.48.mefenoxam.clean$isolate)))
+```
+
+```{r}
+htfs.final <- rbind.data.frame(htfs.24.mefenoxam, 
+                               htfs.48.mefenoxam.clean, 
+                               htfs.24.ethaboxam, 
+                               htfs.48.ethaboxam.clean
+                               )
+```
+
+##Relative Growth
+Calculating relative growth
+```{r}
+htfs.final$chem <- factor(htfs.final$chem)
+
+htfs.relgrowth <- htfs.final %>%
+  group_by(isolate, chem, set) %>%
+  nest() %>%
+  mutate(mean.0ppm = map(data, extract.mean.zero)) %>%
+  unnest(mean.0ppm) %>%
+  unnest(data)
+
+htfs.relgrowth$relgrowth <- htfs.relgrowth$od600meanblank/htfs.relgrowth$mean.0ppm
+```
+
+Lets just plot the relative growth at 100 ppm for each chemistry 
+```{r}
+n_fun <- function(x){return(data.frame(y = mean(x)*0 - 0.03, label = paste0(length(x))))}
+ggplot(htfs.relgrowth[htfs.relgrowth$conc == 100,], aes(x = reorder(species, relgrowth), y = od600meanblank, fill = chem)) + 
+    geom_jitter(alpha = 0.6) +
+  stat_summary(fun.data = mean_se, geom = "errorbar", size = 0.5, width = 0.2) +
+  stat_summary(fun.y = mean, geom = "point", size = 3) + 
+  coord_flip()+
+  scale_y_continuous(limits = c(-0.1, 1)) +
+  theme_bw() + 
+  scale_fill_npg() +
+  facet_wrap(~chem)
+```
+
+##EC50 estimation 
+Here I am using a function in the FunctionsThemes.R file to run a four parameter log logisitic model on the percent relative growth against the log fungicide concentration. There will be some isolates that fail to converge. I will subset those out to use them with different starting values for optimization of the LL.4 model. 
+```{r}
+EC50.try <- htfs.relgrowth %>%
+  group_by(isolate, set, chem, species, location, year, treatment, tissue, unique) %>%
+  nest() %>%
+  mutate(drmod = map(data, drm.func)) %>%
+  mutate(class.mod = map(drmod, class)) %>%
+  unnest(class.mod) 
+
+EC50.final <- subset(EC50.try, class.mod != "try-error")
+  
+EC50 <- EC50.final %>%
+  mutate(EC50.estimate = map(drmod, ED.func)) %>%
+  unnest(EC50.estimate) %>%
+   select(isolate, set, chem, species, location, year, treatment, tissue, EC50.estimate) 
+```
+
+At this point it is important to inspect each non-defined absolute EC50 value and make sure everything makes sense. If you question the result, eliminate false positive resistant isolates by placing them on fungicide amended agar medium to double check things. 
+
+When confident set any non-defined EC50 value, or EC50 value greater than the largest concentration tested (>100 ppm) at 100 ppm for plotting and to not extrapolate the EC50 value beyond the concentration range tested. 
+```{r}
+# Setting any non-defined EC50 estimates as > 100 
+# Later we will have to put these in tables as > 100
+EC50$EC50.estimate <- ifelse(EC50$EC50.estimate > 100, 100, EC50$EC50.estimate)
+EC50$EC50.estimate <- ifelse(is.na(EC50$EC50.estimate) == TRUE, 100, EC50$EC50.estimate)
+```
+
+##Isolates with convergence issues 
+
+these isolates were so sensitive that the EC50 is almost below the first dose at 0.01 ppm. Since we did not have a 0.001 ppm dose, this created problems for the convergence of the LL.4 model and the optim function within drc failed. Instead we can give the optim function an approximate starting point to model our dose response curve effectivly since these are still valuble results, we dont want to just through these EC50 estimates out. 
+
+We will give starting values to the optim function by specifying start = in the drm function. 
+our starting values were: 
+slope = 0.5 
+lower limit = 0, 
+upper liimit = 100
+EC50 = 0.01 
+
+I am using these starting values because I know these isolates are pretty darn sensitive. So I expect the EC50 to be low, and the lower limit to be close to zero. 
+```{r}
+failed.isolates <- as.character(EC50.try$unique[EC50.try$class.mod == "try-error"])
+convergence.fail <- htfs.relgrowth[htfs.relgrowth$unique %in% failed.isolates,]
+
+convergence.issues <- convergence.fail %>%
+  group_by(isolate, set, chem, species, location, year, treatment, tissue, unique) %>%
+  nest() %>%
+  mutate(drm4.mod = map(data, drm.func.convergence)) %>%
+  mutate(class.mod = map(drm4.mod, class)) %>%
+  unnest(class.mod) 
+
+EC50.convergence <- subset(convergence.issues, class.mod != "try-error")
+  
+EC50.fail <- EC50.convergence %>%
+  mutate(EC50.estimate = map(drm4.mod, ED.func)) %>%
+  unnest(EC50.estimate) %>%
+  select(isolate, set, chem, species, location, year, treatment, tissue, EC50.estimate)
+```
+
+After this there were still 3 isolates with convergence issues. Therefore I used the dr4pl package to estimate these EC50s. This package uses a different optimization algorithm but still uses an LL.4 model to estimate EC50. 
+```{r}
+still.convergence <- subset(convergence.issues, class.mod == "try-error")
+
+convergence.VAL1602_13 <- dr4pl(still.convergence$data[[1]]$conc, still.convergence$data[[1]]$relgrowth*100) 
+convergence.VAL1602_13
+
+convergence.VAL1602_30 <- dr4pl(still.convergence$data[[2]]$conc, still.convergence$data[[2]]$relgrowth*100) 
+convergence.VAL1602_30
+
+convergence.VAL1602_40 <- dr4pl(still.convergence$data[[3]]$conc, still.convergence$data[[3]]$relgrowth*100) 
+convergence.VAL1602_40
+
+#Isolate VAL1602_13 really does not make any sense - an EC50 of 7e-65, I dont think so.... I will just set this to 0.01 and say it was less than that. 
+
+still.convergence$EC50.estimate <- c(0.01,
+                                     as.numeric(convergence.VAL1602_30$parameters[2]),
+                                     as.numeric(convergence.VAL1602_40$parameters[2]))
+convergence.EC50 <- still.convergence %>%
+  select(isolate, set, chem, species, location, year, treatment, tissue, EC50.estimate)
+```
+
+Put everything back together
+```{r}
+EC50.final <- rbind.data.frame(EC50, EC50.fail, convergence.EC50)
+```
+
+Now since there were some isolates that were done more than once and some that were not I will take the mean of these values to obtain just one value per isolate. Also some EC50 estimates below 0.01 I will just set these to 0.01 for plotting. 
+```{r}
+ec50 <- EC50.final %>%
+  #subset(!unique %in% isolate.absolute.not.defined) %>%
+  group_by(isolate, chem, species, year, location, treatment, tissue) %>%
+  summarise(N = length(EC50.estimate),
+               mean = mean(EC50.estimate),
+               sd   = sd(EC50.estimate),
+               se   = sd / sqrt(N))
+
+ec50_eth <- ec50 %>% 
+  subset(chem == "ethaboxam") 
+dif = matrix(0, nrow = 313, ncol = 313)
+for(i in 1:313){
+  dif[,i] <- ec50_eth$mean[[i]]/ec50_eth$mean
+}
+rownames(dif) <- ec50_eth$isolate
+colnames(dif) <- ec50_eth$isolate
+dif[lower.tri(dif, diag = FALSE)] <- NA
+dif_df <- cbind(which(!is.na(dif),arr.ind = TRUE),na.omit(as.vector(dif)))
+isolate.row <- rownames(dif_df)
+isolate.col <- colnames(dif)
+dif_df <- data.frame(dif_df, isolate.row)
+dif_df$isolate.col <- ec50_eth$isolate[dif_df$col]
+
+dif_df$is.comp <- ifelse(dif_df$row == dif_df$col, "discard", "keep")
+dif_df <- subset(dif_df, dif_df$is.comp == "keep") # deleting the diagonal
+
+dif_df$species.row <- ec50_eth$species[match(dif_df$isolate.row,ec50_eth$isolate)]
+dif_df$species.col <- ec50_eth$species[match(dif_df$isolate.col,ec50_eth$isolate)]
+dif_df$spec.comp <- ifelse(dif_df$species.row == dif_df$species.col, "Intraspecific", "Interspecific")
+
+ggplot(dif_df, aes(x = species.col, y = log2(V3))) +
+  geom_boxplot() +
+  coord_flip()
+  stat_compare_means(method="t.test")
+
+t.test(dif_df$V3 ~ dif_df$spec.comp, alternative = "greater")
+
+dif_df$logFC <- log(dif_df$V3)
+
+ggplot(dif_df, aes(x = logFC, fill = spec.comp)) + 
+  geom_density(alpha = 0.6)
+
+car::leveneTest(logFC ~ spec.comp, data = dif_df)
+
+var(dif_df$logFC[dif_df$spec.comp == "Interspecific"])
+var(dif_df$logFC[dif_df$spec.comp == "Intraspecific"])
+
+
+ec50_mef <- ec50 %>% 
+  subset(chem == "mefenoxam") 
+dif = matrix(0, nrow = 360, ncol = 360)
+for(i in 1:360){
+  dif[,i] <- ec50_mef$mean[[i]]/ec50_mef$mean
+}
+rownames(dif) <- ec50_mef$isolate
+colnames(dif) <- ec50_mef$isolate
+dif[lower.tri(dif, diag = FALSE)] <- NA
+dif_df <- cbind(which(!is.na(dif),arr.ind = TRUE),na.omit(as.vector(dif)))
+isolate.row <- rownames(dif_df)
+isolate.col <- colnames(dif)
+dif_df <- data.frame(dif_df, isolate.row)
+dif_df$isolate.col <- ec50_mef$isolate[dif_df$col]
+
+dif_df$is.comp <- ifelse(dif_df$row == dif_df$col, "discard", "keep")
+dif_df <- subset(dif_df, dif_df$is.comp == "keep") # deleting the diagonal
+
+dif_df$species.row <- ec50_mef$species[match(dif_df$isolate.row,ec50_mef$isolate)]
+dif_df$species.col <- ec50_mef$species[match(dif_df$isolate.col,ec50_mef$isolate)]
+dif_df$spec.comp <- ifelse(dif_df$species.row == dif_df$species.col, "Intraspecific", "Interspecific")
+
+ggplot(dif_df, aes(x = spec.comp, y = logFC)) +
+  geom_boxplot() +
+  stat_compare_means()
+
+t.test(dif_df$V3 ~ dif_df$spec.comp, alternative = "greater")
+
+dif_df$logFC <- log(dif_df$V3)
+
+ggplot(dif_df, aes(x = logFC, fill = spec.comp)) + 
+  geom_density(alpha = 0.6)
+
+car::leveneTest(logFC ~ spec.comp, data = dif_df)
+
+
+ec50$mean <- ifelse(ec50$mean < 0.01, 0.01, ec50$mean)
+```
+
+Write a csv file to then put into a table if you desire. 
+```{r}
+write.csv(ec50, "ec50_final.csv") 
+```
+
+## EC50 distribution plots
+EC50 distribution plotting. 
+```{r}
+colors_ethaboxam <- c('#a50026',
+             '#d73027',
+             '#f46d43',
+             '#fdae61',
+             '#dfc27d', 
+             '#bf812d',
+             '#8c510a',
+             '#543005',
+             'black',
+             'white',
+             'grey',
+             '#40004b',
+             '#762a83',
+             '#9970ab',
+             '#c2a5cf',
+             '#4393c3',
+             '#2166ac',
+             '#d9f0d3',
+             '#5aae61',
+             '#1b7837',
+             '#00441b', pal_npg("nrc")(10))
+colors_mefenoxam <- c('#a50026',
+             '#d73027',
+             '#f46d43',
+             '#fdae61',
+             '#fee090',
+             '#dfc27d', 
+             '#bf812d',
+             '#8c510a',
+             '#543005',
+             'black',
+             'white',
+             'grey',
+             '#40004b',
+             '#762a83',
+             '#9970ab',
+             '#c2a5cf',
+             '#4393c3',
+             '#2166ac',
+             '#d9f0d3',
+             '#a6dba0',
+             '#5aae61',
+             '#1b7837',
+             '#00441b', pal_npg("nrc")(10))
+
+
+
+A <- ggplot(ec50[ec50$chem == "ethaboxam",], aes(x = mean, fill = species)) + 
+  geom_histogram(colour="black") +
+  theme_classic() + 
+  scale_fill_manual(values= alpha(colors_ethaboxam, 0.8)) +
+  scale_y_continuous(breaks = seq(from = 0, to = 100, by = 2)) +
+  scale_x_log10( 
+                breaks = c(0.01, 0.1, 1, 10, 100), 
+                labels = c(expression("< 0.01 μg ml"^-1), 
+                           expression("0.1 μg ml"^-1),
+                           expression("1 μg ml"^-1),
+                           expression("10 μg ml"^-1),
+                           expression("> 100 μg ml"^-1))
+                ) +
+  xlab(expression("Log10 EC"[50] ~ "μg ml"^-1)) +
+  ylab("Count") +
+    theme(legend.position="bottom", 
+        legend.title=element_blank())
+
+B <- ggplot(ec50[ec50$chem == "mefenoxam",], aes(x = mean, fill = species)) + 
+  geom_histogram(colour="black") +
+  theme_classic() + 
+  scale_fill_manual(values= alpha(colors_mefenoxam, 0.8)) +
+  scale_y_continuous(breaks = seq(from = 0, to = 100, by = 2)) +
+  scale_x_log10(
+                breaks = c(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5, 10, 100), 
+                labels = c(expression("< 0.01 μg ml"^-1), 
+                           expression("0.025 μg ml"^-1),
+                           expression("0.05 μg ml"^-1),
+                           expression("0.1 μg ml"^-1),
+                           expression("0.25 μg ml"^-1),
+                           expression("0.5 μg ml"^-1),
+                           expression("1 μg ml"^-1),
+                           expression("5 μg ml"^-1),
+                           expression("10 μg ml"^-1),
+                           expression("> 100 μg ml"^-1))
+                ) +
+  xlab(expression("Log10 EC"[50] ~ "μg ml"^-1)) +
+  ylab("Count") +
+  theme(legend.position="bottom", 
+        legend.title=element_blank())
+
+plot_grid(A, B, nrow = 1, labels = "AUTO")
+```
+
+## Pythium sylvaticum - sensitivity
+- I am going to use Pythium sylvaticum to test the effect of seed treatment and location etc. because it was the most abundant species and we have representative isolates tested for each factor
+- I am going to test with mefenoxam sensitivity and ethaboxam sensitivity, but know that the reason for testing these factors was because we wanted to know if by planting in the same location each year we would select for more insensitivity. So by isolating from Intego suite, they were exposed to a mixture, We do not have a treatment that contained only ethaboxam so we cannot exclusivley test if ethaboxam insensivity increased from year to year. 
+```{r}
+ec50_sylv <- ec50 %>%
+  subset(species == "Pythium sylvaticum" & chem == "mefenoxam") 
+
+sylv.lm <- lm(mean ~ location*treatment*as.factor(year)*tissue, data = ec50_sylv)
+qqnorm(resid(sylv.lm)); qqline(resid(sylv.lm)) # looks like it might be good to log transform here. 
+
+sylv.lm.log <- lm(log(mean) ~ location*treatment*as.factor(year)*tissue, data = ec50_sylv)
+qqnorm(resid(sylv.lm.log)); qqline(resid(sylv.lm.log)) # got a little better, so we will use this because the residuals are not as bad. 
+
+car::Anova(sylv.lm.log, type = 2) # location was the only significant factor. Lets test this alone as a main factor to see if it really is significant. 
+
+sylv.lm.log <- lm(log(mean) ~ location, data = ec50_sylv)
+qqnorm(resid(sylv.lm.log)); qqline(resid(sylv.lm.log)) # pretty good
+
+car::Anova(sylv.lm.log, type = 2) # looks like it was signicant.
+```
+
+lets plot a boxplot to see what the data is we are dealing with 
+```{r}
+ggplot(ec50_sylv, aes(y = log(mean), x = reorder(location, mean), fill = location)) + 
+  geom_boxplot() +
+  geom_jitter() +
+  theme_classic() +
+  stat_compare_means(method = "anova") + 
+  stat_summary(fun.data = n_fun, geom = "text", 
+               position = position_dodge(.9))
+```
+Well it seems like our n in indianna and illinois is not super high. lets restrict our data to MI, OH, and IA and perform the same tests. 
+
+```{r}
+ec50_sylv_sublocation <- ec50_sylv %>%
+  subset(location == c("IA", "OH", "IL"))
+
+sylv.lm.log <- lm(log(mean) ~ location, data = ec50_sylv_sublocation)
+qqnorm(resid(sylv.lm.log)); qqline(resid(sylv.lm.log)) # got a little better, so we will use this because the residuals are not as bad. 
+
+anova(sylv.lm.log) # location is no longer a significant factor. 
+```
+By restricting the tests to only including sites with adequate N there is now no significant factor.
+
+Lets do a similar thing with Pythium ultimum 
+```{r}
+ec50_ult <- ec50 %>%
+  subset(species == "Pythium ultimum var. ultimum" & chem == "mefenoxam") 
+
+ult.lm.log <- lm(log(mean) ~ location*treatment*as.factor(year)*tissue, data = ec50_ult)
+qqnorm(resid(ult.lm.log)); qqline(resid(ult.lm.log)) # got a little better, so we will use this because the residuals are not as bad. 
+
+anova(ult.lm.log)
+```
+No significant factors
+
+From these data we can conclude that treatment, year, nor location influenced the mefenoxam sensitivity in Pythium sylvaticum or Pythium ultimum. Meaning that they were all pretty sensitive regardless. 
+
+Lets test these across a couple species - Use Pythium ultimum var. ultimum, Pythium sylvaticum, Pythium heterothallicum, Pythium irregulare, and Pythium attrantheridium because they were the most abundant and have at least 20 of each species tested with both mefenoxam and ethaboxam. 
+```{r}
+options(scipen=10000)
+multispec <- ec50 %>%
+  subset(species %in% c("Pythium ultimum var. ultimum" , "Pythium sylvaticum", "Pythium heterothallicum", "Pythium irregulare", "Pythium attrantheridium")) 
+
+multispec$species <- factor(multispec$species, levels = c("Pythium irregulare", "Pythium sylvaticum", "Pythium attrantheridium","Pythium heterothallicum", "Pythium ultimum var. ultimum"))
+
+A <- ggplot(multispec[multispec$chem == "ethaboxam",], aes(x = reorder(species, mean), y = mean)) + 
+  geom_boxplot(fill = "grey") +
+  #stat_compare_means(method = "anova") + 
+  scale_y_log10(limits = c(0.001, 15)) +
+  xlab("") + 
+  theme_classic() +
+  ylab(expression("Log10 Ethaboxam EC"[50] ~ "μg ml"^-1))+
+  scale_x_discrete(labels = c("Py. irregulare (n = 22)", "Py. sylvaticum (n = 98)", "Py. attrantheridium (n = 27)","Py. heterothallicum (n = 27)", "Py. ultimum var. ultimum (n = 42)")) +
+  #stat_summary(fun.data = n_fun, geom = "text", position = position_dodge(.9)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+B <- ggplot(multispec[multispec$chem == "mefenoxam",], aes(x = species, mean, y = mean)) + 
+  geom_boxplot(fill = "grey") +
+  #stat_compare_means(method = "anova") + 
+  scale_y_log10(limits = c(0.003, 1)) +
+  xlab("") + 
+  theme_classic() +
+  scale_x_discrete(labels = c("Py. irregulare (n = 27)", "Py. sylvaticum (n = 108)", "Py. attrantheridium (n = 31)","Py. heterothallicum (n = 47)", "Py. ultimum var. ultimum (n = 43)")) +
+  ylab(expression("Log10 Mefenoxam EC"[50] ~ "μg ml"^-1))+
+  #stat_summary(fun.data = n_fun, geom = "text", position = position_dodge(.9)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+plot_grid(A, B, nrow = 2, labels = "AUTO")
+
+
+multispec.lm <- lm(mean ~ species*chem, data = multispec)
+par(mfrow=c(2,2)) # init 4 charts in 1 panel
+plot(multispec.lm) # really not that bad
+# I am a little concerned about the unequal variances and unequal sample numbers, but ANOVAs are pretty robust to moderate departers of assumptions so I will go with this. 
+
+lsmeans3 <- lsmeans::lsmeans(multispec.lm, c("species", "chem"))
+plot(lsmeans3)
+lsmeans.plant.health <- emmeans::emmeans(multispec.lm, ~species|chem) # estimate lsmeans of variety within siteXyear
+Results_lsmeansEC <- emmeans::cld(lsmeans.plant.health, alpha = 0.05, adjust = "tuk", Letters = letters, reversed = TRUE, details = TRUE) # contrast with Tukey ajustment
+Results_lsmeansEC
+
+kruskal.test(mean ~ species, data = multispec) 
+PT = FSA::dunnTest(mean ~ species,
+              data=multispec,
+              method="bh")
+```
+
+
+
+
+
+```{r}
+ec50.spec.final <- ec50 %>%
+  #subset(!unique %in% isolate.absolute.not.defined) %>%
+  group_by(species, chem) %>%
+  summarise(N = length(mean),
+               mean = mean(mean),
+               sd   = sd(mean),
+               se   = sd / sqrt(N))
+```
+
+
+
+##Other analyses
+
+Model selection for EC50 estimation - I am going to select random isolates run, drc with LL.4 or LL.3 models to see which has the least residual variance. 
+
+In the loop below i am sampling with replacement, 330 isolates, running a LL.4 model then comparing that model to LL.3, BC.4, or W2.4 model. 
+```{r}
+random.isolate <- htfs.relgrowth %>%
+  subset(!unique %in% failed.isolates)
+
+random.isolate$unique <- factor(random.isolate$unique)
+choices <- levels(random.isolate$unique)
+
+mod.select.final <- NULL
+for (i in 1:330) {
+  x <- sample(1:length(choices), 1)
+  chosen.isolate <- random.isolate[random.isolate$unique == choices[x],]
+  model.chosen.isolate <- drm(relgrowth ~ conc, fct = LL.4(), data = chosen.isolate)
+
+## Model selection
+model.selection <- data.frame(mselect(model.chosen.isolate, list(LL.3(), BC.4(), W2.4())))
+model.selection$isolate <- as.character(unique(chosen.isolate$isolate))
+model.selection$model <- rownames(model.selection)
+
+mod.select.final <- rbind.data.frame(model.selection, mod.select.final)
+}
+
+ggplot(mod.select.final, aes(y = log(Res.var), x = model, fill = model)) + 
+  geom_boxplot()
+```
+Looks like there really isn't any significant differences in residual variance for the models. So LL.4 model is probably sufficient to describe the EC50 of these isolates. 
+
+
+
+
+EC50 distributions
+```{r}
+ggplot(EC50, aes(x = reorder(species, EC50.estimate), y = EC50.estimate, fill = chem)) + 
+    geom_jitter(alpha = 0.2) +
+  geom_violin()+
+  #stat_summary(fun.data = mean_se, geom = "errorbar", size = 0.5, width = 0.2) +
+  #stat_summary(fun.y = mean, geom = "point", size = 3) + 
+  stat_summary(fun.data = n_fun, geom = "text") +
+  #coord_flip()+
+  theme_bw() + 
+  scale_y_continuous(limits = c(-0.1, 100)) +
+  scale_fill_npg() +
+  facet_wrap(~chem, scales = "free")
+```
+
+
+```{r}
+ggplot(EC50, aes(log(EC50.estimate), fill = as.factor(treatment))) + 
+  geom_density(alpha = 0.6) + 
+  facet_wrap(~location*chem, scales = "free") + 
+  theme_classic() + 
+  scale_fill_npg()
+```
+
+
+```{r}
+EC50.lm <- lm(relgrowth ~ location*as.factor(year)*species*treatment, data = htfs.relgrowth[htfs.relgrowth$chem == "mefenoxam" & htfs.relgrowth$conc == 100,])
+plot(EC50.lm)
+
+anova(EC50.lm)
+
+
+lsmeans.log.mod.tissue <- emmeans::emmeans(EC50.lm, ~year|location)
+Results_lsmeans_tissueXlocationXyear <- emmeans::CLD(lsmeans.log.mod.tissue , alpha = 0.05, Letters = letters, reversed = TRUE, details = TRUE, type = "response")
+Results_lsmeans_tissueXlocationXyear
+```
