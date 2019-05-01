@@ -1,4 +1,5 @@
-# Valent-Isolation-Manuscript
+# Oomycete-Isolation-from-seed-treatments
+
 Manuscript about isolation of oomycetes from soybean roots treated with oomicides
 
 The questions we were trying to answer with this manuscript were: 
