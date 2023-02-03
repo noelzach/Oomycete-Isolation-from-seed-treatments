@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/173163915.svg)](https://zenodo.org/badge/latestdoi/173163915)
+
 # Oomycete-Isolation-from-seed-treatments
 
 Manuscript about isolation of oomycetes from soybean roots treated with oomicides
